@@ -58,6 +58,17 @@ const meaningfulWhenBlankElements = [
   'AUDIO', 'VIDEO'
 ]
 
+const descendantTagBits = new Map()
+voidElements.concat(meaningfulWhenBlankElements).forEach(function (tagName) {
+  if (!descendantTagBits.has(tagName)) {
+    descendantTagBits.set(tagName, 1 << descendantTagBits.size)
+  }
+})
+
+const voidElementsMask = tagMask(voidElements)
+const meaningfulWhenBlankElementsMask = tagMask(meaningfulWhenBlankElements)
+let descendantTagMasks = new WeakMap()
+
 export function isMeaningfulWhenBlank (node) {
   return is(node, meaningfulWhenBlankElements)
 }
@@ -66,11 +77,24 @@ export function hasMeaningfulWhenBlank (node) {
   return has(node, meaningfulWhenBlankElements)
 }
 
+export function resetDescendantTagCache () {
+  descendantTagMasks = new WeakMap()
+}
+
 function is (node, tagNames) {
   return tagNames.indexOf(node.nodeName) >= 0
 }
 
 function has (node, tagNames) {
+  if (node.nodeType === 1 && node.getElementsByTagName) {
+    if (tagNames === voidElements) {
+      return Boolean(descendantTagMask(node) & voidElementsMask)
+    }
+    if (tagNames === meaningfulWhenBlankElements) {
+      return Boolean(descendantTagMask(node) & meaningfulWhenBlankElementsMask)
+    }
+  }
+
   return (
     node.getElementsByTagName &&
     tagNames.some(function (tagName) {
@@ -79,24 +103,54 @@ function has (node, tagNames) {
   )
 }
 
-const markdownEscapes = [
-  [/\\/g, '\\\\'],
-  [/\*/g, '\\*'],
-  [/^-/g, '\\-'],
-  [/^\+ /g, '\\+ '],
-  [/^(=+)/g, '\\$1'],
-  [/^(#{1,6}) /g, '\\$1 '],
-  [/`/g, '\\`'],
-  [/^~~~/g, '\\~~~'],
-  [/\[/g, '\\['],
-  [/\]/g, '\\]'],
-  [/^>/g, '\\>'],
-  [/_/g, '\\_'],
-  [/^(\d+)\. /g, '$1\\. ']
-]
+function tagMask (tagNames) {
+  return tagNames.reduce(function (mask, tagName) {
+    return mask | descendantTagBits.get(tagName)
+  }, 0)
+}
+
+function descendantTagMask (root) {
+  if (descendantTagMasks.has(root)) return descendantTagMasks.get(root)
+
+  const order = []
+  const pending = [root]
+  while (pending.length) {
+    const node = pending.pop()
+    if (node !== root && descendantTagMasks.has(node)) continue
+    order.push(node)
+    for (let child = node.lastChild; child; child = child.previousSibling) {
+      if (child.nodeType === 1) pending.push(child)
+    }
+  }
+
+  for (let index = order.length - 1; index >= 0; index--) {
+    const element = order[index]
+    let mask = 0
+    for (let child = element.firstChild; child; child = child.nextSibling) {
+      if (child.nodeType !== 1) continue
+      mask |= descendantTagBits.get(child.nodeName) || 0
+      mask |= descendantTagMasks.get(child) || 0
+    }
+    descendantTagMasks.set(element, mask)
+  }
+
+  return descendantTagMasks.get(root) || 0
+}
+
+const markdownEscapePattern = /^(?:(-)|(\+ )|(=+)|(#{1,6} )|(~~~)|(>)|(\d+)(\. ))|([\\*`\x5b\x5d_])/g
 
 export function escapeMarkdown (string) {
-  return markdownEscapes.reduce(function (accumulator, escape) {
-    return accumulator.replace(escape[0], escape[1])
-  }, string)
+  return string.replace(
+    markdownEscapePattern,
+    function (match, dash, plus, equals, heading, tilde, quote, digits, dotSpace, special) {
+      if (dash) return '\\-'
+      if (plus) return '\\' + plus
+      if (equals) return '\\' + equals
+      if (heading) return '\\' + heading
+      if (tilde) return '\\' + tilde
+      if (quote) return '\\>'
+      if (digits) return digits + '\\.' + dotSpace.slice(1)
+      return special === '\\' ? '\\\\' : '\\' + special
+    }
+  )
 }

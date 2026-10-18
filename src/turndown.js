@@ -1,10 +1,8 @@
 import COMMONMARK_RULES from './commonmark-rules'
 import Rules from './rules'
-import { escapeMarkdown, extend, trimLeadingNewlines, trimTrailingNewlines } from './utilities'
+import { escapeMarkdown, extend, resetDescendantTagCache, trimLeadingNewlines, trimTrailingNewlines } from './utilities'
 import RootNode from './root-node'
 import Node from './node'
-const reduce = Array.prototype.reduce
-
 export default function TurndownService (options) {
   if (!(this instanceof TurndownService)) return new TurndownService(options)
 
@@ -53,6 +51,10 @@ TurndownService.prototype = {
 
     if (input === '') return ''
 
+    // RootNode clones DOM inputs, so each conversion has a fresh tree. Keep
+    // descendant summaries scoped to that tree and avoid stale results across
+    // calls that reuse a subsequently modified DOM input.
+    resetDescendantTagCache()
     const output = process.call(this, new RootNode(input, this.options))
     return postProcess.call(this, output)
   },
@@ -139,18 +141,52 @@ TurndownService.prototype = {
 
 function process (parentNode) {
   const self = this
-  return reduce.call(parentNode.childNodes, function (output, node) {
-    node = new Node(node, self.options)
+  const childNodes = parentNode.childNodes
+  const childCount = childNodes.length
+  if (childCount === 0) return ''
 
-    let replacement = ''
-    if (node.nodeType === 3) {
-      replacement = node.isCode ? node.nodeValue : self.escape(node.nodeValue)
-    } else if (node.nodeType === 1) {
-      replacement = replacementForNode.call(self, node)
+  function replacementForChild (child) {
+    const node = new Node(child, self.options)
+    if (node.nodeType === 3) return node.isCode ? node.nodeValue : self.escape(node.nodeValue)
+    if (node.nodeType === 1) return replacementForNode.call(self, node)
+    return ''
+  }
+
+  if (childCount === 1) {
+    const replacement = replacementForChild(childNodes[0])
+    let leadingNewlines = 0
+    while (leadingNewlines < replacement.length && replacement.charCodeAt(leadingNewlines) === 10) {
+      leadingNewlines++
     }
+    const separatorLength = Math.min(2, leadingNewlines)
+    return (separatorLength === 1 ? '\n' : separatorLength === 2 ? '\n\n' : '') + replacement.slice(leadingNewlines)
+  }
 
-    return join(output, replacement)
-  }, '')
+  const chunks = []
+  let trailingNewlines = 0
+  for (let index = 0; index < childCount; index++) {
+    const replacement = replacementForChild(childNodes[index])
+    let start = 0
+    while (start < replacement.length && replacement.charCodeAt(start) === 10) start++
+    let end = replacement.length
+    while (end > start && replacement.charCodeAt(end - 1) === 10) end--
+
+    const leadingNewlines = start
+    const separatorLength = Math.min(2, Math.max(trailingNewlines, leadingNewlines))
+
+    if (end > start) {
+      if (separatorLength) chunks.push(separatorLength === 1 ? '\n' : '\n\n')
+      chunks.push(replacement.slice(start, end))
+      trailingNewlines = replacement.length - end
+    } else {
+      // Keep the complete separator pending when replacement is empty or all
+      // LFs. A following join trims this tail before choosing its separator.
+      trailingNewlines = separatorLength
+    }
+  }
+
+  if (trailingNewlines) chunks.push('\n'.repeat(trailingNewlines))
+  return chunks.join('')
 }
 
 /**
